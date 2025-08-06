@@ -34,7 +34,7 @@ class LinkedInScraper:
             ]
             self.browser = await p.chromium.launch(
                 headless=True,
-                executable_path='/home/ruslan-nocode/.cache/ms-playwright/chromium-1091/chrome-linux/chrome',
+                   executable_path='/home/ruslan-nocode/.cache/ms-playwright/chromium-1117/chrome-linux/chrome',
                 args=chromium_args
             )
             self.context = await self.browser.new_context()
