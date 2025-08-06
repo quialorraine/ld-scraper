@@ -26,7 +26,10 @@ class LinkedInScraper:
         if self.browser is None:
             print("Launching browser...")
             p = await async_playwright().start()
-            self.browser = await p.chromium.launch(headless=True)
+            self.browser = await p.chromium.launch(
+                headless=True,
+                executable_path='/usr/bin/google-chrome'
+            )
             self.context = await self.browser.new_context()
             print("Setting cookie...")
             await self.context.add_cookies([{'name': 'li_at', 'value': self.cookie, 'domain': '.linkedin.com', 'path': '/'}])
