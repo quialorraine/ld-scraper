@@ -26,9 +26,16 @@ class LinkedInScraper:
         if self.browser is None:
             print("Launching browser...")
             p = await async_playwright().start()
+            chromium_args = [
+                '--disable-gpu',
+                '--single-process',
+                '--no-zygote',
+                '--no-sandbox'
+            ]
             self.browser = await p.chromium.launch(
                 headless=True,
-                executable_path='/usr/bin/chromium'
+                executable_path='/usr/bin/chromium',
+                args=chromium_args
             )
             self.context = await self.browser.new_context()
             print("Setting cookie...")
@@ -461,26 +468,19 @@ class LinkedInScraper:
         return comments_data
 
     async def extract_reactions(self, page):
-        print("Extracting reactions...")
+        print("Extracting reactions (no scroll)...")
         reactions_data = []
         try:
-            await page.wait_for_selector("div.feed-shared-update-v2", timeout=20000)
+            await page.wait_for_selector("div.feed-shared-update-v2", timeout=10000)
             print("Activity feed loaded for reactions.")
-            last_height = 0
-            scroll_attempts = 0
-            while scroll_attempts < 10:
-                await page.mouse.wheel(0, 5000)
-                await page.wait_for_timeout(2000)
-                new_height = await page.evaluate("document.body.scrollHeight")
-                if new_height == last_height:
-                    scroll_attempts += 1
-                else:
-                    last_height = new_height
-                    scroll_attempts = 0
             
+            # NO SCROLLING - process only initially visible posts
             post_cards = await page.locator("div.feed-shared-update-v2").all()
-            # Take only the last self.reactions_limit cards (most recent appear first)
+            print(f"Found {len(post_cards)} initial reaction cards.")
+            
+            # Take only up to self.reactions_limit cards
             post_cards = post_cards[:self.reactions_limit]
+            
             for card in post_cards:
                 post_data = {}
                 actor_text_loc = card.locator(".feed-shared-actor__sub-description.t-12.t-normal.t-black--light").first
@@ -488,9 +488,11 @@ class LinkedInScraper:
                     actor_text = await actor_text_loc.inner_text()
                     if "likes this" in actor_text or "celebrates this" in actor_text:
                         post_data["liked_by"] = actor_text.split(" ")[0]
+                
                 content_loc = card.locator(".update-components-text").first
                 if await content_loc.count() > 0:
                     post_data["content"] = (await content_loc.inner_text()).strip()
+                
                 if post_data:
                     reactions_data.append(post_data)
         except Exception as e:
