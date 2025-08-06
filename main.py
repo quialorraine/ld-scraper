@@ -6,57 +6,32 @@ import glob
 import json
 import uuid
 import asyncio
+import aiofiles
 
 from linkedin_scraper import LinkedInScraper
 
 app = FastAPI(title="LinkedIn Scraper API", version="1.0.0")
 
 # ------------------------------
-# Storage helpers
+# New Storage Structure
 # ------------------------------
-BASE_DIR: str = os.path.dirname(os.path.abspath(__file__))
-PROFILE_PATTERN: str = os.path.join(BASE_DIR, "linkedin_profile_*.json")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+PROFILES_DIR = os.path.join(DATA_DIR, "profiles")
+TASKS_DIR = os.path.join(DATA_DIR, "tasks")
 
-_profiles: Dict[str, Dict[str, Any]] = {}
-_tasks: Dict[str, Dict[str, Any]] = {}
-
-
-def _slug_from_path(path: str) -> str:
-    """Extract slug from file path like linkedin_profile_<slug>.json"""
-    name = os.path.basename(path)
-    if name.startswith("linkedin_profile_") and name.endswith(".json"):
-        return name[len("linkedin_profile_") : -len(".json")]
-    return name
-
-
-def load_profiles() -> None:
-    """Load every JSON file that matches the pattern into _profiles dict."""
-    _profiles.clear()
-    for file_path in glob.glob(PROFILE_PATTERN):
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            slug = _slug_from_path(file_path)
-            data["id"] = slug
-            _profiles[slug] = data
-        except Exception as e:
-            # Skip corrupted files but log to stderr
-            print(f"[WARN] Failed to load {file_path}: {e}")
-
-
-# Load profiles at startup
-load_profiles()
-
+# Ensure directories exist
+os.makedirs(PROFILES_DIR, exist_ok=True)
+os.makedirs(TASKS_DIR, exist_ok=True)
 
 # ------------------------------
-# Pydantic models
+# Pydantic models (no changes)
 # ------------------------------
 class ProfileBasic(BaseModel):
     id: str
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     headline: Optional[str] = None
-
 
 class ScrapeRequest(BaseModel):
     url: str
@@ -65,69 +40,39 @@ class ScrapeRequest(BaseModel):
     scrape_comments: bool = False
     scrape_reactions: bool = False
 
+# ------------------------------
+# File-based Helper Functions
+# ------------------------------
+def _slug_from_url(url: str) -> str:
+    """Extract a safe filename slug from a LinkedIn profile URL."""
+    return url.strip("/").split("/")[-1].split("?")[0]
+
+async def _write_task_status(task_id: str, status_data: Dict[str, Any]):
+    """Asynchronously write task status to a file."""
+    task_file = os.path.join(TASKS_DIR, f"{task_id}.json")
+    async with aiofiles.open(task_file, "w", encoding="utf-8") as f:
+        await f.write(json.dumps(status_data, indent=4))
+
+async def _read_task_status(task_id: str) -> Optional[Dict[str, Any]]:
+    """Asynchronously read task status from a file."""
+    task_file = os.path.join(TASKS_DIR, f"{task_id}.json")
+    if not os.path.exists(task_file):
+        return None
+    async with aiofiles.open(task_file, "r", encoding="utf-8") as f:
+        content = await f.read()
+        return json.loads(content)
 
 # ------------------------------
-# Routes
+# Main Scraper Task (modified for file-based status)
 # ------------------------------
-@app.get("/profiles", response_model=List[ProfileBasic])
-async def list_profiles() -> List[Dict[str, Any]]:
-    """Return a list of all stored profiles with minimal fields."""
-    return [
-        {
-            "id": p["id"],
-            "first_name": p.get("first_name"),
-            "last_name": p.get("last_name"),
-            "headline": p.get("headline"),
-        }
-        for p in _profiles.values()
-    ]
-
-
-# Search must be defined BEFORE /profiles/{profile_id} to avoid route shadowing
-@app.get("/profiles/search", response_model=List[ProfileBasic])
-async def search_profiles(query: str) -> List[Dict[str, Any]]:
-    """Search profiles by substring in first/last name or headline (case-insensitive)."""
-    query_lower = query.lower()
-    results: List[Dict[str, Any]] = []
-    for p in _profiles.values():
-        concat_fields = " ".join(filter(None, [p.get("first_name"), p.get("last_name"), p.get("headline")])).lower()
-        if query_lower in concat_fields:
-            results.append({
-                "id": p["id"],
-                "first_name": p.get("first_name"),
-                "last_name": p.get("last_name"),
-                "headline": p.get("headline"),
-            })
-    return results
-
-
-@app.get("/profiles/{profile_id}")
-async def get_profile(profile_id: str) -> Dict[str, Any]:
-    """Return a full JSON profile or 404 if not found."""
-    if profile_id not in _profiles:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found")
-    return _profiles[profile_id]
-
-
-
-
-
-@app.post("/profiles/scrape", status_code=status.HTTP_202_ACCEPTED)
-async def scrape_profile(req: ScrapeRequest, background_tasks: BackgroundTasks):
-    """Run scraping in the background and return task ID."""
-    task_id = str(uuid.uuid4())
-    _tasks[task_id] = {"status": "queued"}
-
-    background_tasks.add_task(_run_scraper_task, task_id, req)
-    profile_id = req.url.strip("/").split("/")[-1].split("?")[0]
-    return {"task_id": task_id, "profile_id": profile_id}
-
-
 async def _run_scraper_task(task_id: str, req: ScrapeRequest) -> None:
-    """Wrapper that actually executes the LinkedInScraper and updates task status."""
+    """
+    Wrapper that executes the scraper and updates the task status file.
+    """
+    profile_id = _slug_from_url(req.url)
+    await _write_task_status(task_id, {"status": "running", "profile_id": profile_id})
+
     try:
-        profile_name = req.url.strip("/").split("/")[-1].split("?")[0]
-        _tasks[task_id].update({"status": "running", "profile_id": profile_name})
         scraper = LinkedInScraper(req.cookie, req.url)
         scraped_data = await scraper.run(
             scrape_posts=req.scrape_posts,
@@ -137,26 +82,121 @@ async def _run_scraper_task(task_id: str, req: ScrapeRequest) -> None:
         await scraper.close_browser()
 
         if scraped_data:
-            profile_name = req.url.strip("/").split("/")[-1].split("?")[0]
-            file_name = os.path.join(BASE_DIR, f"linkedin_profile_{profile_name}.json")
+            profile_file = os.path.join(PROFILES_DIR, f"{profile_id}.json")
+            
+            # Read existing data if it exists
             existing_data: Dict[str, Any] = {}
-            if os.path.exists(file_name):
-                with open(file_name, "r", encoding="utf-8") as f:
-                    existing_data = json.load(f)
+            if os.path.exists(profile_file):
+                async with aiofiles.open(profile_file, "r", encoding="utf-8") as f:
+                    content = await f.read()
+                    existing_data = json.loads(content)
+            
+            # Merge and write back
             existing_data.update(scraped_data)
-            with open(file_name, "w", encoding="utf-8") as f:
-                json.dump(existing_data, f, ensure_ascii=False, indent=4)
-        # Reload profiles so that new/updated data is available immediately
-        load_profiles()
-        _tasks[task_id]["status"] = "completed"
+            async with aiofiles.open(profile_file, "w", encoding="utf-8") as f:
+                await f.write(json.dumps(existing_data, ensure_ascii=False, indent=4))
+        
+        await _write_task_status(task_id, {"status": "completed", "profile_id": profile_id})
+
     except Exception as e:
-        _tasks[task_id]["status"] = "error"
-        _tasks[task_id]["error"] = str(e)
+        error_info = {"status": "error", "profile_id": profile_id, "error": str(e)}
+        await _write_task_status(task_id, error_info)
+        print(f"[ERROR] Task {task_id} failed: {e}")
+
+
+# ------------------------------
+# API Routes (modified for file-based logic)
+# ------------------------------
+@app.post("/profiles/scrape", status_code=status.HTTP_202_ACCEPTED)
+async def scrape_profile(req: ScrapeRequest, background_tasks: BackgroundTasks):
+    """
+    Run scraping in the background and return task ID.
+    Task status is stored in a file.
+    """
+    task_id = str(uuid.uuid4())
+    profile_id = _slug_from_url(req.url)
+    
+    # Immediately create the task file
+    await _write_task_status(task_id, {"status": "queued", "profile_id": profile_id})
+    
+    background_tasks.add_task(_run_scraper_task, task_id, req)
+    return {"task_id": task_id, "profile_id": profile_id}
 
 
 @app.get("/tasks/{task_id}")
 async def get_task_status(task_id: str):
-    task = _tasks.get(task_id)
-    if not task:
+    """
+    Return the status of a task by reading its status file.
+    """
+    task_data = await _read_task_status(task_id)
+    if not task_data:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
-    return task
+    return task_data
+
+
+@app.get("/profiles", response_model=List[ProfileBasic])
+async def list_profiles() -> List[Dict[str, Any]]:
+    """
+    Return a list of all stored profiles by reading from the profiles directory.
+    """
+    profiles: List[Dict[str, Any]] = []
+    profile_files = glob.glob(os.path.join(PROFILES_DIR, "*.json"))
+    for file_path in profile_files:
+        try:
+            async with aiofiles.open(file_path, "r", encoding="utf-8") as f:
+                content = await f.read()
+                data = json.loads(content)
+            profile_id = os.path.basename(file_path).replace(".json", "")
+            profiles.append({
+                "id": profile_id,
+                "first_name": data.get("first_name"),
+                "last_name": data.get("last_name"),
+                "headline": data.get("headline"),
+            })
+        except Exception as e:
+            print(f"[WARN] Failed to load profile {file_path}: {e}")
+    return profiles
+
+
+@app.get("/profiles/search", response_model=List[ProfileBasic])
+async def search_profiles(query: str) -> List[Dict[str, Any]]:
+    """
+    Search profiles by reading all files and checking for a substring match.
+    """
+    query_lower = query.lower()
+    results: List[Dict[str, Any]] = []
+    profile_files = glob.glob(os.path.join(PROFILES_DIR, "*.json"))
+    
+    for file_path in profile_files:
+        try:
+            async with aiofiles.open(file_path, "r", encoding="utf-8") as f:
+                content = await f.read()
+                p = json.loads(content)
+            
+            concat_fields = " ".join(filter(None, [p.get("first_name"), p.get("last_name"), p.get("headline")])).lower()
+            if query_lower in concat_fields:
+                profile_id = os.path.basename(file_path).replace(".json", "")
+                results.append({
+                    "id": profile_id,
+                    "first_name": p.get("first_name"),
+                    "last_name": p.get("last_name"),
+                    "headline": p.get("headline"),
+                })
+        except Exception as e:
+            print(f"[WARN] Failed to search profile {file_path}: {e}")
+            
+    return results
+
+
+@app.get("/profiles/{profile_id}")
+async def get_profile(profile_id: str) -> Dict[str, Any]:
+    """
+    Return a full JSON profile by reading the corresponding file.
+    """
+    profile_file = os.path.join(PROFILES_DIR, f"{profile_id}.json")
+    if not os.path.exists(profile_file):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found")
+    
+    async with aiofiles.open(profile_file, "r", encoding="utf-8") as f:
+        content = await f.read()
+        return json.loads(content)
