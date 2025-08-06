@@ -1,10 +1,23 @@
 # Base image with python
 FROM python:3.11-slim
 
-# Install system dependencies for Playwright
+# Set DEBIAN_FRONTEND to noninteractive
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install system dependencies for Playwright and Google Chrome
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libpango-1.0-0 libpangocairo-1.0-0 libasound2 libxshmfence1 wget gnupg ca-certificates && \
+    # Dependencies for Playwright
+    libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libpango-1.0-0 libpangocairo-1.0-0 libasound2 libxshmfence1 wget gnupg ca-certificates \
+    # Extra dependencies that might be missing
+    libxtst6 libxss1 libgconf-2-4 libnss3-tools libgdk-pixbuf2.0-0 libx11-xcb1 && \
+    # Add Google Chrome's official repository
+    wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome-keyring.gpg && \
+    sh -c 'echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome-keyring.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list' && \
+    apt-get update && \
+    # Install Google Chrome
+    apt-get install -y google-chrome-stable --no-install-recommends && \
+    # Clean up
     rm -rf /var/lib/apt/lists/*
 
 # Create app directory
@@ -13,7 +26,7 @@ WORKDIR /app
 # Copy requirements and install
 COPY requirements.txt /app/
 RUN pip install --no-cache-dir -r requirements.txt && \
-    playwright install --with-deps
+    playwright install --with-deps chromium
 
 # Copy source code
 COPY . /app
